@@ -7,7 +7,9 @@
 
 #pragma once
 
-#include "Arduino.h"
+#include <Arduino.h>
+
+#include "../debug.h"
 #include "BaseSensor.h"
 
 // we are bound by usable GPIOs
@@ -21,7 +23,7 @@ class EventSensor : public BaseSensor {
         // Public
         // ---------------------------------------------------------------------
 
-        EventSensor(): BaseSensor() {
+        EventSensor() {
             _count = 1;
             _sensor_id = SENSOR_EVENTS_ID;
         }
@@ -105,7 +107,7 @@ class EventSensor : public BaseSensor {
         }
 
         // Descriptive name of the slot # index
-        String slot(unsigned char index) {
+        String description(unsigned char index) {
             return description();
         };
 
@@ -136,8 +138,6 @@ class EventSensor : public BaseSensor {
 
         // Handle interrupt calls from isr[GPIO] functions
         void ICACHE_RAM_ATTR handleInterrupt(unsigned char gpio) {
-            UNUSED(gpio);
-
             // clock count in 32bit value, overflowing:
             // ~53s when F_CPU is 80MHz
             // ~26s when F_CPU is 160MHz

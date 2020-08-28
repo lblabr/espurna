@@ -8,9 +8,10 @@
 
 #pragma once
 
-#include "Arduino.h"
+#include <Arduino.h>
+#include <NewPing.h>
+
 #include "BaseSensor.h"
-#include "NewPing.h"
 
 class SonarSensor : public BaseSensor {
 
@@ -20,7 +21,7 @@ class SonarSensor : public BaseSensor {
         // Public
         // ---------------------------------------------------------------------
 
-        SonarSensor(): BaseSensor() {
+        SonarSensor() {
             _count = 1;
             _sensor_id = SENSOR_SONAR_ID;
         }
@@ -84,7 +85,7 @@ class SonarSensor : public BaseSensor {
         }
 
         // Descriptive name of the slot # index
-        String slot(unsigned char index) {
+        String description(unsigned char index) {
             return description();
         };
 

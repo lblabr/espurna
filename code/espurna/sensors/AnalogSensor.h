@@ -7,14 +7,14 @@
 
 #pragma once
 
-// Set ADC to TOUT pin
-#undef ADC_MODE_VALUE
-#define ADC_MODE_VALUE ADC_TOUT
+#include <Arduino.h>
 
-#include "Arduino.h"
+#include "../debug.h"
+
 #include "BaseSensor.h"
+#include "BaseAnalogSensor.h"
 
-class AnalogSensor : public BaseSensor {
+class AnalogSensor : public BaseAnalogSensor {
 
     public:
 
@@ -22,7 +22,7 @@ class AnalogSensor : public BaseSensor {
         // Public
         // ---------------------------------------------------------------------
 
-        AnalogSensor(): BaseSensor() {
+        AnalogSensor() {
             _count = 1;
             _sensor_id = SENSOR_ANALOG_ID;
         }
@@ -78,7 +78,7 @@ class AnalogSensor : public BaseSensor {
         }
 
         // Descriptive name of the slot # index
-        String slot(unsigned char index) {
+        String description(unsigned char index) {
             return description();
         };
 
