@@ -10,17 +10,24 @@ Copyright (C) 2019 by Xose Pérez <xose dot perez at gmail dot com>
 
 #if RPN_RULES_SUPPORT
 
+#include <rpnlib.h>
+
 #include "broker.h"
+#include "light.h"
 #include "mqtt.h"
 #include "ntp.h"
+#include "ntp_timelib.h"
 #include "relay.h"
-#include "rpc.h"
-#include "sensor.h"
 #include "rfbridge.h"
+#include "rpc.h"
+#include "rtcmem.h"
+#include "sensor.h"
 #include "terminal.h"
+#include "wifi.h"
 #include "ws.h"
 
 #include <list>
+#include <type_traits>
 #include <vector>
 
 // -----------------------------------------------------------------------------
@@ -167,22 +174,109 @@ void _rpnBrokerStatus(const String& topic, unsigned char id, unsigned int value)
 
 #if NTP_SUPPORT
 
-rpn_error _rpnNtpNow(rpn_context & ctxt) {
-    if (!ntpSynced()) return rpn_operator_error::CannotContinue;
-    rpn_value ts { static_cast<rpn_int>(now()) };
-    rpn_stack_push(ctxt, ts);
-    return 0;
-}
+namespace {
 
-rpn_error _rpnNtpFunc(rpn_context & ctxt, rpn_int (*func)(time_t)) {
-    rpn_value value;
-    rpn_stack_pop(ctxt, value);
+constexpr bool time_t_is_32bit { sizeof(time_t) == 4 };
+constexpr bool time_t_is_64bit { sizeof(time_t) == 8 };
+static_assert(time_t_is_32bit || time_t_is_64bit, "");
 
-    value = rpn_value(func(value.toInt()));
+template <typename T>
+using split_t = std::integral_constant<bool, sizeof(T) == 8>;
+
+using RpnNtpFunc = rpn_int(*)(time_t);
+
+rpn_error _rpnNtpPopTimestampPair(rpn_context& ctxt, RpnNtpFunc func) {
+    rpn_value rhs = rpn_stack_pop(ctxt);
+    rpn_value lhs = rpn_stack_pop(ctxt);
+
+    auto timestamp = (static_cast<long long>(lhs.toInt()) << 32ll)
+        | (static_cast<long long>(rhs.toInt()));
+
+    rpn_value value(func(timestamp));
     rpn_stack_push(ctxt, value);
 
     return 0;
 }
+
+rpn_error _rpnNtpPopTimestampSingle(rpn_context& ctxt, RpnNtpFunc func) {
+    rpn_value input = rpn_stack_pop(ctxt);
+    rpn_value result(func(input.toInt()));
+    rpn_stack_push(ctxt, result);
+    return 0;
+}
+
+void _rpnNtpPushTimestampPair(rpn_context& ctxt, time_t timestamp) {
+    rpn_value lhs(static_cast<rpn_int>((static_cast<long long>(timestamp) >> 32ll) & 0xffffffffll));
+    rpn_value rhs(static_cast<rpn_int>(static_cast<long long>(timestamp) & 0xffffffffll));
+
+    rpn_stack_push(ctxt, lhs);
+    rpn_stack_push(ctxt, rhs);
+}
+
+void _rpnNtpPushTimestampSingle(rpn_context& ctxt, time_t timestamp) {
+    rpn_value result(static_cast<rpn_int>(timestamp));
+    rpn_stack_push(ctxt, result);
+}
+
+inline rpn_error _rpnNtpPopTimestamp(const std::true_type&, rpn_context& ctxt, RpnNtpFunc func) {
+    return _rpnNtpPopTimestampPair(ctxt, func);
+}
+
+inline rpn_error _rpnNtpPopTimestamp(const std::false_type&, rpn_context& ctxt, RpnNtpFunc func) {
+    return _rpnNtpPopTimestampSingle(ctxt, func);
+}
+
+rpn_error _rpnNtpPopTimestamp(rpn_context& ctxt, RpnNtpFunc func) {
+    return _rpnNtpPopTimestamp(split_t<time_t>{}, ctxt, func);
+}
+
+inline void _rpnNtpPushTimestamp(const std::true_type&, rpn_context& ctxt, time_t timestamp) {
+    _rpnNtpPushTimestampPair(ctxt, timestamp);
+}
+
+inline void _rpnNtpPushTimestamp(const std::false_type&, rpn_context& ctxt, time_t timestamp) {
+    _rpnNtpPushTimestampSingle(ctxt, timestamp);
+}
+
+void _rpnNtpPushTimestamp(rpn_context& ctxt, time_t timestamp) {
+    _rpnNtpPushTimestamp(split_t<time_t>{}, ctxt, timestamp);
+}
+
+rpn_error _rpnNtpNow(rpn_context & ctxt) {
+    if (ntpSynced()) {
+        _rpnNtpPushTimestamp(ctxt, now());
+        return 0;
+    }
+
+    return rpn_operator_error::CannotContinue;
+}
+
+rpn_error _rpnNtpFunc(rpn_context & ctxt, RpnNtpFunc func) {
+    return _rpnNtpPopTimestamp(ctxt, func);
+}
+
+bool _rpn_ntp_tick_minute { false };
+bool _rpn_ntp_tick_hour { false };
+
+rpn_error _rpnNtpTickMinute(rpn_context& ctxt) {
+    if (_rpn_ntp_tick_minute) {
+        _rpn_ntp_tick_minute = false;
+        return 0;
+    }
+
+    return rpn_operator_error::CannotContinue;
+}
+
+rpn_error _rpnNtpTickHour(rpn_context& ctxt) {
+    if (_rpn_ntp_tick_hour) {
+        _rpn_ntp_tick_hour = false;
+        return 0;
+    }
+
+    return rpn_operator_error::CannotContinue;
+}
+
+} // namespace
 
 #endif // NTP_SUPPORT
 
@@ -310,6 +404,16 @@ decltype(_rfb_codes)::iterator _rpnRfbFindCode(unsigned char protocol, const Str
     });
 }
 
+rpn_error _rpnRfbSend(rpn_context& ctxt) {
+    auto code = rpn_stack_pop(ctxt);
+    if (!code.isString()) {
+        return rpn_operator_error::InvalidArgument;
+    }
+
+    rfbSend(code.toString());
+    return rpn_operator_error::Ok;
+}
+
 rpn_error _rpnRfbPop(rpn_context& ctxt) {
     auto code = rpn_stack_pop(ctxt);
     auto proto = rpn_stack_pop(ctxt);
@@ -430,7 +534,7 @@ void _rpnRfbSetup() {
         for (auto& code : _rfb_codes) {
             char buffer[128] = {0};
             snprintf_P(buffer, sizeof(buffer),
-                PSTR("\"%s\" proto=%u count=%u last=%u"),
+                PSTR("proto=%u raw=\"%s\" count=%u last=%u"),
                 code.protocol,
                 code.raw.c_str(),
                 code.count,
@@ -473,43 +577,50 @@ void _rpnInit() {
     // TODO: since 1.15.0, timelib+ntpclientlib are no longer used with latest Cores
     //       `now` is always in UTC, `utc_...` functions to be used instead to convert time
     #if NTP_SUPPORT && !NTP_LEGACY_SUPPORT
+    {
+        constexpr size_t time_t_argc { split_t<time_t>{} ? 2 : 1 };
+
+        rpn_operator_set(_rpn_ctxt, "tick_1h", 0, _rpnNtpTickHour);
+        rpn_operator_set(_rpn_ctxt, "tick_1m", 0, _rpnNtpTickMinute);
+
         rpn_operator_set(_rpn_ctxt, "utc", 0, _rpnNtpNow);
         rpn_operator_set(_rpn_ctxt, "now", 0, _rpnNtpNow);
 
-        rpn_operator_set(_rpn_ctxt, "utc_month", 1, [](rpn_context & ctxt) {
+        rpn_operator_set(_rpn_ctxt, "utc_month", time_t_argc, [](rpn_context & ctxt) {
             return _rpnNtpFunc(ctxt, utc_month);
         });
-        rpn_operator_set(_rpn_ctxt, "month", 1, [](rpn_context & ctxt) {
+        rpn_operator_set(_rpn_ctxt, "month", time_t_argc, [](rpn_context & ctxt) {
             return _rpnNtpFunc(ctxt, month);
         });
 
-        rpn_operator_set(_rpn_ctxt, "utc_day", 1, [](rpn_context & ctxt) {
+        rpn_operator_set(_rpn_ctxt, "utc_day", time_t_argc, [](rpn_context & ctxt) {
             return _rpnNtpFunc(ctxt, utc_day);
         });
-        rpn_operator_set(_rpn_ctxt, "day", 1, [](rpn_context & ctxt) {
+        rpn_operator_set(_rpn_ctxt, "day", time_t_argc, [](rpn_context & ctxt) {
             return _rpnNtpFunc(ctxt, day);
         });
 
-        rpn_operator_set(_rpn_ctxt, "utc_dow", 1, [](rpn_context & ctxt) {
+        rpn_operator_set(_rpn_ctxt, "utc_dow", time_t_argc, [](rpn_context & ctxt) {
             return _rpnNtpFunc(ctxt, utc_weekday);
         });
-        rpn_operator_set(_rpn_ctxt, "dow", 1, [](rpn_context & ctxt) {
+        rpn_operator_set(_rpn_ctxt, "dow", time_t_argc, [](rpn_context & ctxt) {
             return _rpnNtpFunc(ctxt, weekday);
         });
 
-        rpn_operator_set(_rpn_ctxt, "utc_hour", 1, [](rpn_context & ctxt) {
+        rpn_operator_set(_rpn_ctxt, "utc_hour", time_t_argc, [](rpn_context & ctxt) {
             return _rpnNtpFunc(ctxt, utc_hour);
         });
-        rpn_operator_set(_rpn_ctxt, "hour", 1, [](rpn_context & ctxt) {
+        rpn_operator_set(_rpn_ctxt, "hour", time_t_argc, [](rpn_context & ctxt) {
             return _rpnNtpFunc(ctxt, hour);
         });
 
-        rpn_operator_set(_rpn_ctxt, "utc_minute", 1, [](rpn_context & ctxt) {
+        rpn_operator_set(_rpn_ctxt, "utc_minute", time_t_argc, [](rpn_context & ctxt) {
             return _rpnNtpFunc(ctxt, utc_minute);
         });
-        rpn_operator_set(_rpn_ctxt, "minute", 1, [](rpn_context & ctxt) {
+        rpn_operator_set(_rpn_ctxt, "minute", time_t_argc, [](rpn_context & ctxt) {
             return _rpnNtpFunc(ctxt, minute);
         });
+    }
     #endif
 
     // TODO: 1.14.0 weekday(...) conversion seemed to have 0..6 range with Monday as 0
@@ -557,15 +668,15 @@ void _rpnInit() {
     #endif // RELAY_SUPPORT == 1
 
     // Channel operators
-    #if RELAY_PROVIDER == RELAY_PROVIDER_LIGHT
+    #if LIGHT_PROVIDER != LIGHT_PROVIDER_NONE
 
         rpn_operator_set(_rpn_ctxt, "update", 0, [](rpn_context & ctxt) -> rpn_error {
-            lightUpdate(true, true);
+            lightUpdate();
             return 0;
         });
 
         rpn_operator_set(_rpn_ctxt, "black", 0, [](rpn_context & ctxt) -> rpn_error {
-            lightColor((unsigned long) 0);
+            lightColor(0ul);
             return 0;
         });
 
@@ -581,6 +692,7 @@ void _rpnInit() {
     #endif
 
     #if RFB_SUPPORT
+        rpn_operator_set(_rpn_ctxt, "rfb_send", 1, _rpnRfbSend);
         rpn_operator_set(_rpn_ctxt, "rfb_pop", 2, _rpnRfbPop);
         rpn_operator_set(_rpn_ctxt, "rfb_info", 2, _rpnRfbInfo);
         rpn_operator_set(_rpn_ctxt, "rfb_sequence", 4, _rpnRfbSequence);
@@ -622,6 +734,101 @@ void _rpnInit() {
         });
     #endif
 
+    rpn_operator_set(_rpn_ctxt, "mem?", 0, [](rpn_context & ctxt) -> rpn_error {
+        rpn_stack_push(ctxt, rpn_value(rtcmemStatus()));
+        return 0;
+    });
+
+    rpn_operator_set(_rpn_ctxt, "mem_write", 2, [](rpn_context & ctxt) -> rpn_error {
+        auto addr = rpn_stack_pop(ctxt).toUint();
+        auto value = rpn_stack_pop(ctxt).toUint();
+
+        if (addr < RTCMEM_BLOCKS) {
+            auto* rtcmem = reinterpret_cast<volatile uint32_t*>(RTCMEM_ADDR);
+            *(rtcmem + addr) = value;
+            return 0;
+        }
+
+        return rpn_operator_error::InvalidArgument;
+    });
+
+    rpn_operator_set(_rpn_ctxt, "mem_read", 1, [](rpn_context & ctxt) -> rpn_error {
+        auto addr = rpn_stack_pop(ctxt).toUint();
+
+        if (addr < RTCMEM_BLOCKS) {
+            auto* rtcmem = reinterpret_cast<volatile uint32_t*>(RTCMEM_ADDR);
+            rpn_uint result = *(rtcmem + addr);
+            rpn_stack_push(ctxt, rpn_value(result));
+            return 0;
+        }
+
+        return rpn_operator_error::InvalidArgument;
+    });
+
+    rpn_operator_set(_rpn_ctxt, "sleep", 2, [](rpn_context & ctxt) -> rpn_error {
+        static bool once { false };
+        if (once) return rpn_operator_error::CannotContinue;
+
+        auto value = rpn_stack_pop(ctxt).checkedToUint();
+        if (!value.ok()) {
+            return value.error();
+        }
+
+        uint64_t duration = value.value();
+        if (!duration) {
+            return rpn_operator_error::CannotContinue;
+        }
+
+        auto mode = rpn_stack_pop(ctxt).toUint();
+
+        once = true;
+        schedule_function([duration, mode]() {
+            wifiTurnOff();
+            ESP.deepSleep(duration * 1000000ull, static_cast<RFMode>(mode));
+        });
+
+        return 0;
+    });
+
+    rpn_operator_set(_rpn_ctxt, "stations", 0, [](rpn_context & ctxt) -> rpn_error {
+        if (!(WiFi.getMode() & WIFI_AP)) return rpn_operator_error::CannotContinue;
+        rpn_stack_push(ctxt, rpn_value(static_cast<rpn_uint>(WiFi.softAPgetStationNum())));
+        return 0;
+    });
+
+    rpn_operator_set(_rpn_ctxt, "disconnect", 0, [](rpn_context & ctxt) -> rpn_error {
+        wifiDisconnect();
+        yield();
+        return 0;
+    });
+
+    rpn_operator_set(_rpn_ctxt, "rssi", 0, [](rpn_context & ctxt) -> rpn_error {
+        if (!wifiConnected()) return rpn_operator_error::CannotContinue;
+        rpn_stack_push(ctxt, rpn_value(static_cast<rpn_int>(WiFi.RSSI())));
+        return 0;
+    });
+
+    rpn_operator_set(_rpn_ctxt, "delay", 1, [](rpn_context & ctxt) -> rpn_error {
+        auto ms = rpn_stack_pop(ctxt);
+        delay(ms.toUint());
+        return 0;
+    });
+
+    rpn_operator_set(_rpn_ctxt, "yield", 0, [](rpn_context & ctxt) -> rpn_error {
+        yield();
+        return 0;
+    });
+
+    rpn_operator_set(_rpn_ctxt, "reset", 0, [](rpn_context & ctxt) -> rpn_error {
+        static bool once = ([]() {
+            deferredReset(100, CustomResetReason::Rule);
+            return true;
+        })();
+        return once
+            ? rpn_operator_error::CannotContinue
+            : rpn_operator_error::Ok;
+    });
+
     rpn_operator_set(_rpn_ctxt, "millis", 0, [](rpn_context & ctxt) -> rpn_error {
         rpn_stack_push(ctxt, rpn_value(static_cast<uint32_t>(millis())));
         return 0;
@@ -636,6 +843,11 @@ void _rpnInit() {
         auto every = rpn_stack_pop(ctxt);
         return _rpnRunnerHandler(ctxt, RpnRunner::Policy::Periodic, every.toUint());
     });
+
+    // XXX: workaround for the vector 2x growth on push. will need to fix this in the rpnlib
+    _rpn_ctxt.operators.shrink_to_fit();
+
+    DEBUG_MSG_P(PSTR("[RPN] Registered %u operators\n"), _rpn_ctxt.operators.size());
 
 }
 
@@ -793,22 +1005,19 @@ void rpnSetup() {
         mqttRegister(_rpnMQTTCallback);
     #endif
 
-    #if NTP_SUPPORT
-        NtpBroker::Register([](const NtpTick tick, time_t timestamp, const String& datetime) {
-            static const String tick_every_hour(F("tick1h"));
-            static const String tick_every_minute(F("tick1m"));
-
-            const char* ptr =
-                (tick == NtpTick::EveryMinute) ? tick_every_minute.c_str() :
-                (tick == NtpTick::EveryHour) ? tick_every_hour.c_str() : nullptr;
-
-            if (ptr != nullptr) {
-                rpn_value value { static_cast<rpn_int>(timestamp) };
-                rpn_variable_set(_rpn_ctxt, ptr, value);
-                _rpn_run = true;
-            }
-        });
-    #endif
+#if NTP_SUPPORT
+    NtpBroker::Register([](NtpTick tick, time_t, const String&) {
+        switch (tick) {
+        case NtpTick::EveryMinute:
+            _rpn_ntp_tick_minute = true;
+            break;
+        case NtpTick::EveryHour:
+            _rpn_ntp_tick_hour = true;
+            break;
+        }
+        _rpn_run = true;
+    });
+#endif
 
     StatusBroker::Register(_rpnBrokerStatus);
 

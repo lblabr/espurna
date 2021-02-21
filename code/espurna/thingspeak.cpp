@@ -13,10 +13,18 @@ Copyright (C) 2019 by Xose Pérez <xose dot perez at gmail dot com>
 #include <memory>
 
 #include "broker.h"
+#include "mqtt.h"
 #include "relay.h"
 #include "rpc.h"
 #include "sensor.h"
 #include "ws.h"
+
+#if THINGSPEAK_USE_ASYNC
+#include <ESPAsyncTCP.h>
+#else
+#include <ESP8266HTTPClient.h>
+#endif
+
 #include "libs/URL.h"
 #include "libs/SecureClientHelpers.h"
 #include "libs/AsyncClientHelpers.h"
@@ -363,7 +371,7 @@ void _tspkPost(const String& address) {
         auto client = std::make_unique<WiFiClient>();
         _tspkPost(*client.get(), url, false);
         return;
-    }        
+    }
 
 }
 

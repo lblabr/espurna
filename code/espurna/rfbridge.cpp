@@ -326,6 +326,12 @@ void _rfbSendImpl(const RfbMessage& message);
 
 #if WEB_SUPPORT
 
+void _rfbWebSocketOnVisible(JsonObject& root) {
+    root["rfbVisible"] = 1;
+}
+
+#if RELAY_SUPPORT
+
 void _rfbWebSocketSendCodeArray(JsonObject& root, unsigned char start, unsigned char size) {
     JsonObject& rfb = root.createNestedObject("rfb");
     rfb["size"] = size;
@@ -340,32 +346,34 @@ void _rfbWebSocketSendCodeArray(JsonObject& root, unsigned char start, unsigned 
     }
 }
 
-void _rfbWebSocketOnVisible(JsonObject& root) {
-    root["rfbVisible"] = 1;
+void _rfbWebSocketOnData(JsonObject& root) {
+    _rfbWebSocketSendCodeArray(root, 0, relayCount());
 }
+
+#endif // RELAY_SUPPORT
 
 void _rfbWebSocketOnConnected(JsonObject& root) {
     root["rfbRepeat"] = getSetting("rfbRepeat", RFB_SEND_REPEATS);
+#if RELAY_SUPPORT
     root["rfbCount"] = relayCount();
-    #if RFB_PROVIDER == RFB_PROVIDER_RCSWITCH
-        root["rfbdirectVisible"] = 1;
-        root["rfbRX"] = getSetting("rfbRX", RFB_RX_PIN);
-        root["rfbTX"] = getSetting("rfbTX", RFB_TX_PIN);
-    #endif
+#endif
+#if RFB_PROVIDER == RFB_PROVIDER_RCSWITCH
+    root["rfbdirectVisible"] = 1;
+    root["rfbRX"] = getSetting("rfbRX", RFB_RX_PIN);
+    root["rfbTX"] = getSetting("rfbTX", RFB_TX_PIN);
+#endif
 }
 
 void _rfbWebSocketOnAction(uint32_t client_id, const char * action, JsonObject& data) {
+#if RELAY_SUPPORT
     if (strcmp(action, "rfblearn") == 0) rfbLearn(data["id"], data["status"]);
     if (strcmp(action, "rfbforget") == 0) rfbForget(data["id"], data["status"]);
     if (strcmp(action, "rfbsend") == 0) rfbStore(data["id"], data["status"], data["data"].as<const char*>());
+#endif
 }
 
 bool _rfbWebSocketOnKeyCheck(const char * key, JsonVariant& value) {
     return (strncmp(key, "rfb", 3) == 0);
-}
-
-void _rfbWebSocketOnData(JsonObject& root) {
-    _rfbWebSocketSendCodeArray(root, 0, relayCount());
 }
 
 #endif // WEB_SUPPORT
@@ -504,6 +512,48 @@ bool _rfbRelayHandler(const char* buffer, bool locked = false) {
     }
 
     return result;
+}
+
+void _rfbLearnStartFromPayload(const char* payload) {
+    // The payload must be the `relayID,mode` (where mode is either 0 or 1)
+    const char* sep = strchr(payload, ',');
+    if (nullptr == sep) {
+        return;
+    }
+
+    // ref. RelaysMax, we only have up to 2 digits
+    char relay[3] {0, 0, 0};
+    if ((sep - payload) > 2) {
+        return;
+    }
+
+    std::copy(payload, sep, relay);
+
+    char *endptr = nullptr;
+    const auto id = strtoul(relay, &endptr, 10);
+    if (endptr == &relay[0] || endptr[0] != '\0') {
+        return;
+    }
+
+    if (id >= relayCount()) {
+        DEBUG_MSG_P(PSTR("[RF] Invalid relay ID (%u)\n"), id);
+        return;
+    }
+
+    ++sep;
+    if ((*sep == '0') || (*sep == '1')) {
+        rfbLearn(id, (*sep != '0'));
+    }
+}
+
+void _rfbLearnFromReceived(std::unique_ptr<RfbLearn>& learn, const char* buffer) {
+    if (millis() - learn->ts > RFB_LEARN_TIMEOUT) {
+        DEBUG_MSG_P(PSTR("[RF] Learn timeout after %u ms\n"), millis() - learn->ts);
+        learn.reset(nullptr);
+        return;
+    }
+
+    _rfbLearnFromString(learn, buffer);
 }
 
 #endif // RELAY_SUPPORT
@@ -787,16 +837,6 @@ size_t _rfbModemPack(uint8_t (&out)[RfbMessage::BufferSize], RfbMessage::code_ty
     return index;
 }
 
-void _rfbLearnFromReceived(std::unique_ptr<RfbLearn>& learn, const char* buffer) {
-    if (millis() - learn->ts > RFB_LEARN_TIMEOUT) {
-        DEBUG_MSG_P(PSTR("[RF] Learn timeout after %u ms\n"), millis() - learn->ts);
-        learn.reset(nullptr);
-        return;
-    }
-
-    _rfbLearnFromString(learn, buffer);
-}
-
 void _rfbReceiveImpl() {
 
     if (!_rfb_receive) return;
@@ -883,9 +923,12 @@ void _rfbSendQueued() {
 
 // Check if the payload looks like a HEX code (plus comma, specifying the 'repeats' arg for the queue)
 void _rfbSendFromPayload(const char * payload) {
+    size_t len { strlen(payload) };
+    if (!len) {
+        return;
+    }
 
     decltype(_rfb_repeats) repeats { _rfb_repeats };
-    size_t len { strlen(payload) };
 
     const char* sep { strchr(payload, ',') };
     if (sep) {
@@ -911,39 +954,14 @@ void _rfbSendFromPayload(const char * payload) {
     // We postpone the actual sending until the loop, as we may've been called from MQTT or HTTP API
     // RFB_PROVIDER implementation should select the appropriate de-serialization function
     _rfbEnqueue(payload, len, repeats);
-
 }
 
-void _rfbLearnStartFromPayload(const char* payload) {
-    // The payload must be the `relayID,mode` (where mode is either 0 or 1)
-    const char* sep = strchr(payload, ',');
-    if (nullptr == sep) {
-        return;
-    }
+void rfbSend(const char* code) {
+    _rfbSendFromPayload(code);
+}
 
-    // ref. RelaysMax, we only have up to 2 digits
-    char relay[3] {0, 0, 0};
-    if ((sep - payload) > 2) {
-        return;
-    }
-
-    std::copy(payload, sep, relay);
-
-    char *endptr = nullptr;
-    const auto id = strtoul(relay, &endptr, 10);
-    if (endptr == &relay[0] || endptr[0] != '\0') {
-        return;
-    }
-
-    if (id >= relayCount()) {
-        DEBUG_MSG_P(PSTR("[RF] Invalid relay ID (%u)\n"), id);
-        return;
-    }
-
-    ++sep;
-    if ((*sep == '0') || (*sep == '1')) {
-        rfbLearn(id, (*sep != '0'));
-    }
+void rfbSend(const String& code) {
+    _rfbSendFromPayload(code.c_str());
 }
 
 #if MQTT_SUPPORT
@@ -1012,42 +1030,43 @@ void _rfbMqttCallback(unsigned int type, const char * topic, char * payload) {
 
 void _rfbApiSetup() {
 
-    apiReserve(3u);
-
-    apiRegister({
-        MQTT_TOPIC_RFOUT, Api::Type::Basic, ApiUnusedArg,
+    apiRegister(F(MQTT_TOPIC_RFOUT),
         apiOk, // just a stub, nothing to return
-        [](const Api&, ApiBuffer& buffer) {
-            _rfbSendFromPayload(buffer.data);
+        [](ApiRequest& request) {
+            _rfbSendFromPayload(request.param(F("value")).c_str());
+            return true;
         }
-    });
+    );
 
 #if RELAY_SUPPORT
-    apiRegister({
-        MQTT_TOPIC_RFLEARN, Api::Type::Basic, ApiUnusedArg,
-        [](const Api&, ApiBuffer& buffer) {
+    apiRegister(F(MQTT_TOPIC_RFLEARN),
+        [](ApiRequest& request) {
+            char buffer[64] { 0 };
             if (_rfb_learn) {
-                snprintf_P(buffer.data, buffer.size, PSTR("learning id:%u,status:%c"),
+                snprintf_P(buffer, sizeof(buffer), PSTR("learning id:%u,status:%c"),
                     _rfb_learn->id, _rfb_learn->status ? 't' : 'f'
                 );
             } else {
-                snprintf_P(buffer.data, buffer.size, PSTR("waiting"));
+                snprintf_P(buffer, sizeof(buffer), PSTR("waiting"));
             }
+            request.send(buffer);
+            return true;
         },
-        [](const Api&, ApiBuffer& buffer) {
-            _rfbLearnStartFromPayload(buffer.data);
+        [](ApiRequest& request) {
+            _rfbLearnStartFromPayload(request.param(F("value")).c_str());
+            return true;
         }
-    });
+    );
 #endif
 
 #if RFB_PROVIDER == RFB_PROVIDER_EFM8BB1
-    apiRegister({
-        MQTT_TOPIC_RFRAW, Api::Type::Basic, ApiUnusedArg,
+    apiRegister(F(MQTT_TOPIC_RFRAW),
         apiOk, // just a stub, nothing to return
-        [](const Api&, ApiBuffer& buffer) {
-            _rfbSendRawFromPayload(buffer.data);
+        [](ApiRequest& request) {
+            _rfbSendRawFromPayload(request.param(F("value")).c_str());
+            return true;
         }
-    });
+    );
 #endif
 
 }
@@ -1057,6 +1076,15 @@ void _rfbApiSetup() {
 #if TERMINAL_SUPPORT
 
 void _rfbInitCommands() {
+
+    terminalRegisterCommand(F("RFB.SEND"), [](const terminal::CommandContext& ctx) {
+        if (ctx.argc == 2) {
+            rfbSend(ctx.argv[1]);
+            return;
+        }
+
+        terminalError(ctx, F("RFB.SEND <CODE>"));
+    });
 
 #if RELAY_SUPPORT
     terminalRegisterCommand(F("RFB.LEARN"), [](const terminal::CommandContext& ctx) {
@@ -1122,7 +1150,7 @@ void _rfbInitCommands() {
 // -----------------------------------------------------------------------------
 
 void rfbStore(unsigned char id, bool status, const char * code) {
-    settings_key_t key { status ? F("rfbON") : F("rfbOFF"), id };
+    SettingsKey key { status ? F("rfbON") : F("rfbOFF"), id };
     setSetting(key, code);
     DEBUG_MSG_P(PSTR("[RF] Saved %s => \"%s\"\n"), key.toString().c_str(), code);
 }
@@ -1131,6 +1159,8 @@ String rfbRetrieve(unsigned char id, bool status) {
     return getSetting({ status ? F("rfbON") : F("rfbOFF"), id });
 }
 
+#if RELAY_SUPPORT
+
 void rfbStatus(unsigned char id, bool status) {
     // TODO: This is a left-over from the old implementation. Right now we set this lock when relay handler
     //       is called within the receiver, while this is called from either relayStatus or relay loop calling
@@ -1138,10 +1168,7 @@ void rfbStatus(unsigned char id, bool status) {
     // TODO: Consider having 'origin' of the relay change. Either supply relayStatus with an additional arg,
     //       or track these statuses directly.
     if (!_rfb_relay_status_lock[id]) {
-        String value = rfbRetrieve(id, status);
-        if (value.length() && !(value.length() & 1)) {
-            _rfbSendFromPayload(value.c_str());
-        }
+        rfbSend(rfbRetrieve(id, status));
     }
 
     _rfb_relay_status_lock[id] = false;
@@ -1166,11 +1193,13 @@ void rfbForget(unsigned char id, bool status) {
 
 }
 
+#endif // RELAY_SUPPORT
+
 // -----------------------------------------------------------------------------
 // SETUP & LOOP
 // -----------------------------------------------------------------------------
 
-#if RFB_PROVIDER == RFB_PROVIDER_RCSWITCH
+#if RELAY_SUPPORT && (RFB_PROVIDER == RFB_PROVIDER_RCSWITCH)
 
 // TODO: remove this in 1.16.0
 
@@ -1201,12 +1230,12 @@ void _rfbSettingsMigrate(int version) {
     String buffer;
 
     for (unsigned char index = 0; index < relayCount(); ++index) {
-        const settings_key_t on_key {F("rfbON"), index};
+        SettingsKey on_key {F("rfbON"), index};
         if (migrate_code(buffer, getSetting(on_key))) {
             setSetting(on_key, buffer);
         }
 
-        const settings_key_t off_key {F("rfbOFF"), index};
+        SettingsKey off_key {F("rfbOFF"), index};
         if (migrate_code(buffer, getSetting(off_key))) {
             setSetting(off_key, buffer);
         }
@@ -1223,33 +1252,39 @@ void rfbSetup() {
 
 #elif RFB_PROVIDER == RFB_PROVIDER_RCSWITCH
 
+#if RELAY_SUPPORT
     _rfbSettingsMigrate(migrateVersion());
+#endif
 
     {
         auto rx = getSetting("rfbRX", RFB_RX_PIN);
         auto tx = getSetting("rfbTX", RFB_TX_PIN);
 
-        // TODO: tag gpioGetLock with a NAME string, skip log here
-        _rfb_receive = gpioValid(rx);
-        _rfb_transmit = gpioValid(tx);
-        if (!_rfb_transmit && !_rfb_receive) {
+        if ((GPIO_NONE == rx) && (GPIO_NONE == tx)) {
             DEBUG_MSG_P(PSTR("[RF] Neither RX or TX are set\n"));
             return;
         }
 
         _rfb_modem = new RCSwitch();
-        if (_rfb_receive) {
+        if (gpioLock(rx)) {
+            _rfb_receive = true;
             _rfb_modem->enableReceive(rx);
             DEBUG_MSG_P(PSTR("[RF] RF receiver on GPIO %u\n"), rx);
         }
-        if (_rfb_transmit) {
+        if (gpioLock(tx)) {
             auto transmit = getSetting("rfbTransmit", RFB_TRANSMIT_REPEATS);
+            _rfb_transmit = true;
             _rfb_modem->enableTransmit(tx);
             _rfb_modem->setRepeatTransmit(transmit);
             DEBUG_MSG_P(PSTR("[RF] RF transmitter on GPIO %u\n"), tx);
         }
     }
 
+#endif
+
+#if RELAY_SUPPORT
+    relaySetStatusNotify(rfbStatus);
+    relaySetStatusChange(rfbStatus);
 #endif
 
 #if MQTT_SUPPORT
@@ -1262,10 +1297,12 @@ void rfbSetup() {
 
 #if WEB_SUPPORT
     wsRegister()
-        .onVisible(_rfbWebSocketOnVisible)
-        .onConnected(_rfbWebSocketOnConnected)
+#if RELAY_SUPPORT
         .onData(_rfbWebSocketOnData)
         .onAction(_rfbWebSocketOnAction)
+#endif
+        .onConnected(_rfbWebSocketOnConnected)
+        .onVisible(_rfbWebSocketOnVisible)
         .onKeyCheck(_rfbWebSocketOnKeyCheck);
 #endif
 
