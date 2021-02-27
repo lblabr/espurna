@@ -138,7 +138,7 @@ constexpr size_t palsSize() { return sizeof(pals)/sizeof(pals[0]); }
 Adafruit_NeoPixel pixels = Adafruit_NeoPixel(GARLAND_LEDS, GARLAND_D_PIN, NEO_GRB + NEO_KHZ800);
 Scene scene(&pixels);
 
-Anim* anims[] = {new AnimGlow(), new AnimStart(), new AnimPixieDust(), new AnimSparkr(), new AnimRun(), new AnimStars(), new AnimSpread(), 
+Anim* anims[] = {new AnimStatic(), new AnimBlink(), new AnimFill(), new AnimFillReverse(), new AnimOnePixel(), new AnimGlow(), new AnimStart(), new AnimPixieDust(), new AnimSparkr(), new AnimRun(), new AnimStars(), new AnimSpread(), 
                  new AnimRandCyc(), new AnimFly(), new AnimComets(), new AnimAssemble(), new AnimDolphins(), new AnimSalut()};
 
 constexpr size_t animsSize() { return sizeof(anims)/sizeof(anims[0]); }
@@ -485,7 +485,7 @@ void garlandSetup() {
 
 #define GARLAND_SCENE_TRANSITION_MS      1000    // transition time between animations, ms
 #define GARLAND_SCENE_SPEED_MAX          70
-#define GARLAND_SCENE_SPEED_FACTOR       10
+#define GARLAND_SCENE_SPEED_FACTOR       1
 #define GARLAND_SCENE_DEFAULT_SPEED      50
 #define GARLAND_SCENE_DEFAULT_BRIGHTNESS 255
 
